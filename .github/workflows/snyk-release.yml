@@ -1,0 +1,697 @@
+name: Snyk Release Security & SBOM
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+  SNYK_ORG: jfernandez-organization
+
+jobs:
+  snyk-release-security:
+    name: Snyk Release Security & SBOM
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # =========================================================
+      # 1. Checkout del PR
+      # =========================================================
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # =========================================================
+      # 2. Java / Maven
+      # =========================================================
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      # =========================================================
+      # 3. Instalar Snyk CLI
+      # =========================================================
+      - name: Install Snyk CLI
+        run: |
+          npm install -g snyk
+          snyk --version
+
+      # =========================================================
+      # 4. Autenticar
+      # =========================================================
+      - name: Authenticate Snyk
+        run: |
+          snyk auth "$SNYK_TOKEN"
+
+      # =========================================================
+      # 5. Identificar commits
+      # =========================================================
+      - name: Identify commits
+        id: commits
+        run: |
+          echo "BASE_SHA=${{ github.event.pull_request.base.sha }}"
+          echo "PR_SHA=${{ github.event.pull_request.head.sha }}"
+
+          echo "base_sha=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+          echo "pr_sha=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+
+      # =========================================================
+      # 6. Crear directorios de resultados
+      # =========================================================
+      - name: Prepare scan directories
+        run: |
+          mkdir -p reports/baseline
+          mkdir -p reports/pr
+
+      # =========================================================
+      # 7. Checkout MAIN - BASELINE
+      # =========================================================
+      - name: Checkout main baseline
+        run: |
+          git checkout "${{ steps.commits.outputs.base_sha }}"
+
+      # =========================================================
+      # 8. SCA baseline
+      # =========================================================
+      - name: Baseline - Open Source
+        continue-on-error: true
+        run: |
+          snyk test \
+            --file=pom.xml \
+            --org="$SNYK_ORG" \
+            --json-file-output=reports/baseline/open-source.json
+
+      # =========================================================
+      # 9. Code baseline
+      # =========================================================
+      - name: Baseline - Code
+        continue-on-error: true
+        run: |
+          snyk code test \
+            --org="$SNYK_ORG" \
+            --json-file-output=reports/baseline/code.json
+
+      # =========================================================
+      # 10. Secrets baseline
+      # =========================================================
+      - name: Baseline - Secrets
+        continue-on-error: true
+        run: |
+          snyk secrets test \
+            --org="$SNYK_ORG" \
+            --json-file-output=reports/baseline/secrets.json
+
+      # =========================================================
+      # 11. IaC baseline
+      # =========================================================
+      - name: Baseline - IaC
+        continue-on-error: true
+        run: |
+          snyk iac test deploy/k8s \
+            --org="$SNYK_ORG" \
+            --json-file-output=reports/baseline/iac.json
+
+      # =========================================================
+      # SNYK DOCKERFILE - BASELINE
+      # =========================================================
+
+      - name: Snyk Dockerfile scan - BASELINE
+        id: dockerfile_baseline
+        shell: bash
+        run: |
+            set +e
+
+            IMAGE=$(awk '
+            toupper($1) == "FROM" {
+                print $2
+                exit
+            }
+            ' Dockerfile)
+
+            if [ "$IMAGE" = "openjdk:17" ]; then
+                IMAGE="${IMAGE}-ea-8-oraclelinux8"
+            fi
+
+            echo "Dockerfile base image: $IMAGE"
+
+            if [ -z "$IMAGE" ]; then
+            echo "❌ Could not determine base image from Dockerfile"
+            exit 2
+            fi
+
+            snyk container test "$IMAGE" \
+            --file=Dockerfile \
+            --org="$SNYK_ORG" \
+            --json-file-output=reports/baseline/dockerfile.json
+
+            SNYK_EXIT=$?
+
+            echo "Snyk Dockerfile baseline exit code: $SNYK_EXIT"
+
+            # 0 = sin vulnerabilidades
+            # 1 = vulnerabilidades encontradas
+            # 2/3 = error del análisis
+
+            if [ "$SNYK_EXIT" -ge 2 ]; then
+            exit "$SNYK_EXIT"
+            fi
+
+            exit 0      
+
+      # =========================================================
+      # 12. Checkout nuevamente del PR
+      # =========================================================
+      - name: Checkout PR version
+        run: |
+          git checkout "${{ steps.commits.outputs.pr_sha }}"
+
+      # =========================================================
+      # 13. SCA PR
+      # =========================================================
+      - name: PR - Open Source
+        continue-on-error: true
+        run: |
+          snyk test \
+            --file=pom.xml \
+            --org="$SNYK_ORG" \
+            --json-file-output=reports/pr/open-source.json
+
+      # =========================================================
+      # 14. Code PR
+      # =========================================================
+      - name: PR - Code
+        continue-on-error: true
+        run: |
+          snyk code test \
+            --org="$SNYK_ORG" \
+            --json-file-output=reports/pr/code.json
+
+      # =========================================================
+      # 15. Secrets PR
+      # =========================================================
+      - name: PR - Secrets
+        continue-on-error: true
+        run: |
+          snyk secrets test \
+            --org="$SNYK_ORG" \
+            --json-file-output=reports/pr/secrets.json
+
+      # =========================================================
+      # 16. IaC PR
+      # =========================================================
+      - name: PR - IaC
+        continue-on-error: true
+        run: |
+          snyk iac test deploy/k8s \
+            --org="$SNYK_ORG" \
+            --json-file-output=reports/pr/iac.json
+
+
+
+      # =========================================================
+      # SNYK DOCKERFILE - PR
+      # =========================================================
+
+      - name: Snyk Dockerfile scan - PR
+        id: dockerfile_pr
+        shell: bash
+        run: |
+            set +e
+
+            IMAGE=$(awk '
+            toupper($1) == "FROM" {
+                print $2
+                exit
+            }
+            ' Dockerfile)
+
+            if [ "$IMAGE" = "openjdk:17" ]; then
+                IMAGE="${IMAGE}-ea-8-oraclelinux8"
+            fi
+            
+            echo "Dockerfile pr image: $IMAGE"
+
+            if [ -z "$IMAGE" ]; then
+            echo "❌ Could not determine PR image from Dockerfile"
+            exit 2
+            fi
+
+            snyk container test "$IMAGE" \
+            --file=Dockerfile \
+            --org="$SNYK_ORG" \
+            --json-file-output=reports/pr/dockerfile.json
+
+            SNYK_EXIT=$?
+
+            echo "Snyk Dockerfile PR exit code: $SNYK_EXIT"
+
+            # 0 = sin vulnerabilidades
+            # 1 = vulnerabilidades encontradas
+            # 2/3 = error del análisis
+
+            if [ "$SNYK_EXIT" -ge 2 ]; then
+            exit "$SNYK_EXIT"
+            fi
+
+            exit 0      
+    
+      # =========================================================
+      # 17. Generar SBOM
+      # =========================================================
+      - name: Generate SBOM
+        run: |
+          snyk sbom \
+            --file=pom.xml \
+            --format=cyclonedx1.6+json \
+            --json-file-output=sbom.cdx.json
+
+      # =========================================================
+      # 18. Comparar BASELINE vs PR
+      # =========================================================
+      - name: Compare baseline and PR findings
+        id: comparison
+        shell: bash
+        run: |
+
+          python3 <<'PY'
+          import json
+          import os
+
+          categories = {
+              "Open Source": (
+                  "reports/baseline/open-source.json",
+                  "reports/pr/open-source.json"
+              ),
+              "Code": (
+                  "reports/baseline/code.json",
+                  "reports/pr/code.json"
+              ),
+              "Secrets": (
+                  "reports/baseline/secrets.json",
+                  "reports/pr/secrets.json"
+              ),
+              "IaC": (
+                  "reports/baseline/iac.json",
+                  "reports/pr/iac.json"
+              ),
+              "Container": (
+                  "reports/baseline/dockerfile.json",
+                  "reports/pr/dockerfile.json"
+              )
+          }
+
+          def load(path):
+              try:
+                  with open(path, "r") as f:
+                      return json.load(f)
+              except Exception:
+                  return {}
+
+          def extract_ids(data, category):
+            ids = set()
+
+            if not isinstance(data, dict):
+                return ids
+
+            # =====================================================
+            # Snyk Open Source
+            # =====================================================
+            if category == "Open Source":
+
+                for item in data.get("vulnerabilities", []):
+                    if not isinstance(item, dict):
+                        continue
+
+                    vulnerability_id = item.get("id")
+
+                    if vulnerability_id:
+                        ids.add(str(vulnerability_id))
+
+                return ids
+
+            # =====================================================
+            # Snyk Code
+            # =====================================================
+            if category == "Code":
+
+                for run in data.get("runs", []):
+                    if not isinstance(run, dict):
+                        continue
+
+                    for result in run.get("results", []):
+                        if not isinstance(result, dict):
+                            continue
+
+                        fingerprints = result.get("fingerprints", {})
+
+                        if not isinstance(fingerprints, dict):
+                            fingerprints = {}
+
+                        finding_id = (
+                            fingerprints.get("snyk/asset/finding/v1")
+                            or fingerprints.get("identity")
+                        )
+
+                        if finding_id:
+                            ids.add(str(finding_id))
+
+                return ids
+
+            # =====================================================
+            # Snyk Secrets
+            # =====================================================
+            if category == "Secrets":
+
+                for run in data.get("runs", []):
+                    if not isinstance(run, dict):
+                        continue
+
+                    for result in run.get("results", []):
+                        if not isinstance(result, dict):
+                            continue
+
+                        fingerprints = result.get("fingerprints", {})
+
+                        if not isinstance(fingerprints, dict):
+                            fingerprints = {}
+
+                        finding_id = (
+                            fingerprints.get("snyk/asset/finding/v1")
+                            or fingerprints.get("identity")
+                        )
+
+                        if finding_id:
+                            ids.add(str(finding_id))
+
+                return ids
+
+            # =====================================================
+            # Snyk IaC
+            # =====================================================
+            if category == "IaC":
+
+                for issue in data.get("infrastructureAsCodeIssues", []):
+                    if not isinstance(issue, dict):
+                        continue
+
+                    rule_id = issue.get("id")
+
+                    if not rule_id:
+                        continue
+
+                    # IaC no nos entrega aquí un Finding ID equivalente
+                    # al de Code/Secrets.
+                    #
+                    # Construimos una identidad estable de la ocurrencia.
+                    fingerprint = "|".join([
+                        str(issue.get("id", "")),
+                        str(issue.get("path", "")),
+                        str(issue.get("targetFile", "")),
+                        str(issue.get("lineNumber", "")),
+                        str(issue.get("subType", "")),
+                        str(issue.get("msg", ""))
+                    ])
+
+                    ids.add(fingerprint)
+
+                return ids
+
+            # =====================================================
+            # Snyk Container
+            # =====================================================
+            if category == "Container":
+
+                for vulnerability in data.get("vulnerabilities", []):
+                    if not isinstance(vulnerability, dict):
+                        continue
+
+                    vulnerability_id = vulnerability.get("id")
+
+                    if vulnerability_id:
+                        ids.add(str(vulnerability_id))
+
+                return ids
+
+            return ids
+
+          results = {}
+
+          for category, (baseline_file, pr_file) in categories.items():
+
+              baseline = extract_ids(load(baseline_file),category)
+              current = extract_ids(load(pr_file),category)
+
+              new_findings = current - baseline
+
+              results[category] = {
+                  "baseline": len(baseline),
+                  "current": len(current),
+                  "new": len(new_findings),
+                  "new_ids": sorted(new_findings)
+              }
+
+          with open("comparison.json", "w") as f:
+              json.dump(results, f, indent=2)
+
+          total_new = sum(
+              value["new"]
+              for value in results.values()
+          )
+
+          print("")
+          print("==========================================")
+          print(" SNYK BASELINE COMPARISON")
+          print("==========================================")
+
+          for category, value in results.items():
+              print(
+                  f'{category}: '
+                  f'baseline={value["baseline"]}, '
+                  f'current={value["current"]}, '
+                  f'new={value["new"]}'
+              )
+
+          print("")
+          print(f"TOTAL NEW FINDINGS: {total_new}")
+          print("")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"total_new={total_new}\n")
+
+          PY
+
+      # =========================================================
+      # 19. Crear Job Summary
+      # =========================================================
+      - name: Generate GitHub Summary
+        if: always()
+        shell: bash
+        run: |
+          python3 <<'PY'
+          import json
+
+          with open("comparison.json") as f:
+              results = json.load(f)
+
+          total_new = sum(
+              item["new"]
+              for item in results.values()
+          )
+
+          with open("summary.md", "w") as f:
+
+              f.write("# Snyk Release Security Gate\n\n")
+
+              f.write(
+                  "**Pull Request:** "
+                  "${{ github.event.pull_request.head.ref }}"
+                  " → "
+                  "${{ github.event.pull_request.base.ref }}\n\n"
+              )
+
+              f.write("## Security comparison\n\n")
+              f.write("| Control | Baseline | Current | New | Result |\n")
+              f.write("|---|---:|---:|---:|---|\n")
+
+              for category, value in results.items():
+
+                  result = "❌" if value["new"] > 0 else "✅"
+
+                  f.write(
+                      f'| {category} | '
+                      f'{value["baseline"]} | '
+                      f'{value["current"]} | '
+                      f'**{value["new"]}** | '
+                      f'{result} |\n'
+                  )
+
+              f.write("\n")
+
+              f.write("## Security artifacts\n\n")
+
+              f.write(
+                  " **SBOM:** "
+                  "CycloneDX 1.6\n\n"
+              )
+
+              f.write(
+                  " **Snyk Reports:** "
+                  "Baseline vs PR scan reports\n\n"
+              )
+
+              f.write(
+                  "_Links to the downloadable artifacts "
+                  "are provided below._\n\n"
+              )
+
+              f.write("---\n\n")
+
+              if total_new == 0:
+
+                  f.write("##  RELEASE APPROVED\n\n")
+
+                  f.write(
+                      "No new Snyk findings were detected "
+                      "compared with the baseline of `main`.\n"
+                  )
+
+              else:
+
+                  f.write("##  RELEASE BLOCKED\n\n")
+
+                  f.write(
+                      f"**{total_new} new Snyk finding(s)** "
+                      "were detected compared with the baseline "
+                      "of `main`.\n"
+                  )
+          PY
+
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+
+
+      # =========================================================
+      # 20. Publicar reports
+      # =========================================================
+      - name: Upload Snyk reports
+        id: reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snyk-release-security-reports
+          path: |
+            reports/
+            comparison.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+
+      # =========================================================
+      # 21. Publicar SBOM
+      # =========================================================
+      - name: Upload SBOM
+        id: sbom
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: sbom.cdx.json
+          if-no-files-found: error
+          retention-days: 30
+
+
+      # =========================================================
+      # 22. Publicar comentario en el PR
+      # =========================================================
+      - name: Comment PR with security result
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SBOM_URL: ${{ steps.sbom.outputs.artifact-url }}
+          REPORTS_URL: ${{ steps.reports.outputs.artifact-url }}
+        run: |
+
+          python3 <<'PY'
+          import os
+
+          summary_file = "summary.md"
+
+          with open(summary_file, "r") as f:
+              summary = f.read()
+
+          sbom_url = os.environ.get("SBOM_URL", "")
+          reports_url = os.environ.get("REPORTS_URL", "")
+
+          artifacts = "\n## Security artifacts\n\n"
+
+          if sbom_url:
+              artifacts += (
+                  f" **[Download SBOM (CycloneDX 1.6)]"
+                  f"({sbom_url})**\n\n"
+              )
+          else:
+              artifacts += (
+                  " **SBOM:** Artifact URL unavailable\n\n"
+              )
+
+          if reports_url:
+              artifacts += (
+                  f" **[View Snyk Security Reports]"
+                  f"({reports_url})**\n\n"
+              )
+          else:
+              artifacts += (
+                  " **Snyk Reports:** Artifact URL unavailable\n\n"
+              )
+
+          summary = summary.replace(
+              "## Security artifacts\n\n"
+              " **SBOM:** CycloneDX 1.6\n\n"
+              " **Snyk Reports:** Baseline vs PR scan reports\n\n"
+              "_Links to the downloadable artifacts are provided below._\n\n",
+              artifacts
+          )
+
+          with open(summary_file, "w") as f:
+              f.write(summary)
+          PY
+
+          gh pr comment \
+            "${{ github.event.pull_request.number }}" \
+            --body-file summary.md
+
+
+      # =========================================================
+      # 23. Security Gate
+      # =========================================================
+      - name: Enforce release security gate
+        if: always()
+        run: |
+
+          TOTAL_NEW="${{ steps.comparison.outputs.total_new }}"
+
+          echo "New Snyk findings: $TOTAL_NEW"
+
+          if [ "$TOTAL_NEW" -gt 0 ]; then
+            echo ""
+            echo "❌ RELEASE BLOCKED"
+            echo "New security findings were detected."
+            exit 1
+          fi
+
+          echo ""
+          echo "✅ RELEASE APPROVED"
+          echo "No new Snyk findings were detected."
