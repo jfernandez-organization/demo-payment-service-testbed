@@ -56,6 +56,6 @@ public class YamlController {
     return ResponseEntity.ok()
      .header("Content-Type", "text/html")
     .body(html);
-
+    }
 
 }
