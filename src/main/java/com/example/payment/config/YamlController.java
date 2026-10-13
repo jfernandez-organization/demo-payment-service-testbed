@@ -33,4 +33,29 @@ public class YamlController {
     .body(html);
 }
 
+        @PostMapping(value = "/xss3", consumes = "application/x-www-form-urlencoded")
+    public ResponseEntity<String> xss3(@RequestBody String input) {
+    String safeInput = StringEscapeUtils.escapeHtml4(input);
+    String html = "<html><body>"
+            + "<h1>Payment Configuration</h1>"
+            + "<p>Configuration: " + safeInput + "</p>"
+            + "</body></html>";
+
+    return ResponseEntity.ok()
+     .header("Content-Type", "text/html")
+    .body(html);
+}
+
+    @PostMapping(value = "/xss4", consumes = "application/x-www-form-urlencoded")
+    public ResponseEntity<String> xss4(@RequestBody String input) {
+    String html = "<html><body>"
+            + "<h1>Payment Configuration</h1>"
+            + "<p>Configuration: " + input + "</p>"
+            + "</body></html>";
+
+    return ResponseEntity.ok()
+     .header("Content-Type", "text/html")
+    .body(html);
+    }
+
 }
